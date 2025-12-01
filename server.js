@@ -1,72 +1,78 @@
 import express from "express";
 import multer from "multer";
-import fs from "fs";
-import path from "path";
 import { exec } from "child_process";
+import fs from "fs";
 import OpenAI from "openai";
 
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-});
-
 const app = express();
-app.use(express.json());
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const upload = multer({ dest: "uploads/" });
 
-const execFFMPEG = (cmd) =>
-    new Promise((resolve, reject) => {
-        exec(cmd, (error, stdout, stderr) => {
-            if (error) return reject(error);
-            resolve(stdout || stderr);
-        });
-    });
-
-app.get("/", (req, res) => {
-    res.send("Call Audit GPT-4.1 Backend Running 🚀");
-});
-
 app.post("/transcribe", upload.single("audio"), async (req, res) => {
-    console.log("🔥 Received /transcribe request");
-    console.log("File:", req.file);
+  console.log("🔥 Received /transcribe request");
+  console.log("File:", req.file);
 
-    const filePath = req.file.path;
+  const input = req.file.path;
+  const agent = `processed/${req.file.filename}_agent.wav`;
+  const customer = `processed/${req.file.filename}_customer.wav`;
 
-    try {
-        // split stereo into left + right
-        console.log("🎧 Splitting channels...");
-        await execFFMPEG(
-            `ffmpeg -i ${filePath} -map_channel 0.0.0 uploads/agent.wav -map_channel 0.0.1 uploads/customer.wav`
-        );
+  try {
+    // ensure processed folder exists
+    if (!fs.existsSync("processed")) fs.mkdirSync("processed");
 
-        console.log("✔ Done — Channels separated");
+    console.log("🎧 Splitting channels...");
 
-        const agentTranscript = await transcribe("uploads/agent.wav");
-        const customerTranscript = await transcribe("uploads/customer.wav");
+    await runFFMPEG(`ffmpeg -i ${input} -map_channel 0.0.0 ${agent} -map_channel 0.0.1 ${customer}`);
 
-        return res.json({
-            status: "ok",
-            agent: agentTranscript,
-            customer: customerTranscript
-        });
+    console.log("✔ FFMPEG complete");
+    console.log("🎙 Sending to GPT-4.1...");
 
-    } catch (err) {
-        console.error("❗ ERROR:", err);
-        return res.status(500).json({
-            status: "error",
-            error: err.toString()
-        });
-    }
-});
+    const [agentTxt, customerTxt] = await Promise.all([
+      transcribe(agent),
+      transcribe(customer)
+    ]);
 
-async function transcribe(file) {
-    console.log(`🧠 Transcribing: ${file}...`);
-    const response = await openai.chat.completions.create({
-        model: "gpt-4.1-mini-tts",
-        audio: fs.readFileSync(file)
+    console.log("✔ TRANSCRIPTION DONE");
+
+    return res.json({
+      status: "ok",
+      message: "Transcription completed",
+      agent_text: agentTxt,
+      customer_text: customerTxt
     });
 
-    return response.text;
+  } catch (err) {
+    console.log("❗ ERROR:", err);
+    return res.json({ status: "error", error: err.message });
+  }
+});
+
+/************** HELPERS ******************/
+
+function runFFMPEG(cmd) {
+  return new Promise((resolve, reject) => {
+    exec(cmd, (error, stdout, stderr) => {
+      if (error) {
+        console.log("🚨 FFMPEG ERROR:", stderr);
+        reject(error);
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
 }
 
-app.listen(4000, () => console.log("🚀 Running on port 4000"));
+async function transcribe(filePath) {
+  const result = await openai.audio.transcriptions.create({
+    file: fs.createReadStream(filePath),
+    model: "gpt-4o-mini-tts", 
+    response_format: "text"
+  });
+
+  return result;
+}
+
+app.get("/", (req, res) => res.send("OK: SERVER LIVE"));
+
+app.listen(4000, () => console.log("🚀 Server running on port 4000"));
