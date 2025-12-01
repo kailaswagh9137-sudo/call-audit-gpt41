@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: call-audit-gpt41
+    env: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "node server.js"
+    nixpacksConfig:
+      packages:
+        - ffmpeg
