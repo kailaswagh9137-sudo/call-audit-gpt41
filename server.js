@@ -1,93 +1,72 @@
 import express from "express";
 import multer from "multer";
 import fs from "fs";
-import cors from "cors";
+import path from "path";
+import { exec } from "child_process";
 import OpenAI from "openai";
 
-const app = express();
-app.use(cors());
-
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+    apiKey: process.env.OPENAI_API_KEY
 });
+
+const app = express();
+app.use(express.json());
 
 const upload = multer({ dest: "uploads/" });
 
+const execFFMPEG = (cmd) =>
+    new Promise((resolve, reject) => {
+        exec(cmd, (error, stdout, stderr) => {
+            if (error) return reject(error);
+            resolve(stdout || stderr);
+        });
+    });
+
 app.get("/", (req, res) => {
-  res.send("Call Audit GPT-4.1 Backend Running 🚀");
+    res.send("Call Audit GPT-4.1 Backend Running 🚀");
 });
 
 app.post("/transcribe", upload.single("audio"), async (req, res) => {
-
-  try {
     console.log("🔥 Received /transcribe request");
     console.log("File:", req.file);
 
     const filePath = req.file.path;
 
-    // CREATE LEFT & RIGHT STEREO EXTRACTS
-    const left = `uploads/${req.file.filename}_LEFT.wav`;
-    const right = `uploads/${req.file.filename}_RIGHT.wav`;
+    try {
+        // split stereo into left + right
+        console.log("🎧 Splitting channels...");
+        await execFFMPEG(
+            `ffmpeg -i ${filePath} -map_channel 0.0.0 uploads/agent.wav -map_channel 0.0.1 uploads/customer.wav`
+        );
 
-    // FFmpeg extract left + right separately
-    await execFFMPEG(`ffmpeg -i ${filePath} -map_channel 0.0.0 ${left}`);
-    await execFFMPEG(`ffmpeg -i ${filePath} -map_channel 0.0.1 ${right}`);
+        console.log("✔ Done — Channels separated");
 
-    console.log("🎧 Stereo channels extracted");
+        const agentTranscript = await transcribe("uploads/agent.wav");
+        const customerTranscript = await transcribe("uploads/customer.wav");
 
-    // Load audio
-    const leftAudio = fs.readFileSync(left);
-    const rightAudio = fs.readFileSync(right);
+        return res.json({
+            status: "ok",
+            agent: agentTranscript,
+            customer: customerTranscript
+        });
 
-    // Send LEFT (agent) to GPT-4.1 for BEST TEXT accuracy
-    const agentTranscript = await openai.audio.transcriptions.create({
-      file: leftAudio,
-      model: "gpt-4.1",
-      response_format: "text",
-      language: "hi"
-    });
-
-    // Send RIGHT (customer)
-    const customerTranscript = await openai.audio.transcriptions.create({
-      file: rightAudio,
-      model: "gpt-4.1",
-      response_format: "text",
-      language: "hi"
-    });
-
-    console.log("🧠 GPT-4.1 transcription complete");
-
-    // Now MERGE conversation
-    const mergedDialogue = `
-Agent: ${agentTranscript}
----
-Customer: ${customerTranscript}
-`;
-
-    res.json({
-      status: "ok",
-      stereoMode: true,
-      agent: agentTranscript,
-      customer: customerTranscript,
-      merged: mergedDialogue
-    });
-
-  } catch (err) {
-    console.error("❗ ERROR:", err);
-    res.json({
-      status: "error",
-      message: err.message
-    });
-  }
+    } catch (err) {
+        console.error("❗ ERROR:", err);
+        return res.status(500).json({
+            status: "error",
+            error: err.toString()
+        });
+    }
 });
 
-function execFFMPEG(command) {
-  return new Promise((resolve, reject) => {
-    const child = require("child_process").exec(command, (err) => {
-      if (err) reject(err);
-      else resolve();
+async function transcribe(file) {
+    console.log(`🧠 Transcribing: ${file}...`);
+    const response = await openai.chat.completions.create({
+        model: "gpt-4.1-mini-tts",
+        audio: fs.readFileSync(file)
     });
-  });
+
+    return response.text;
 }
 
-app.listen(4000, () => console.log("Server running on port 4000"));
+app.listen(4000, () => console.log("🚀 Running on port 4000"));
